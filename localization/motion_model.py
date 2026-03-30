@@ -7,8 +7,9 @@ class MotionModel:
         self.node = node
         self.node.get_logger().info("Motion Model Initialized")
 
-        self.node.declare_parameter("is_sim", False)
-        self.is_sim = self.node.get_parameter("is_sim").value
+        self.node.declare_parameter("deterministic", False)
+        #true if want to remove noise (actual), false if sim
+        self.deterministic = self.node.get_parameter("deterministic").value
 
 
     def make_pose_batch(self, xs, ys, thetas):
@@ -41,7 +42,7 @@ class MotionModel:
         dx, dy, dtheta = odometry
         N = len(particles)
 
-        if not self.is_sim:
+        if self.deterministic:
             dx_n     = np.full(N, dx)
             dy_n     = np.full(N, dy)
             dtheta_n = np.full(N, dtheta)
