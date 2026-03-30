@@ -1,6 +1,6 @@
 import numpy as np
 from scan_simulator_2d import PyScanSimulator2D
-# Try to change to just `from scan_simulator_2d import PyScanSimulator2D` 
+# Try to change to just `from scan_simulator_2d import PyScanSimulator2D`
 # if any error re: scan_simulator_2d occurs
 
 from tf_transformations import euler_from_quaternion
@@ -31,11 +31,11 @@ class SensorModel:
 
         ####################################
         # Adjust these parameters
-        self.alpha_hit = 0
-        self.alpha_short = 0
-        self.alpha_max = 0
-        self.alpha_rand = 0
-        self.sigma_hit = 0
+        self.alpha_hit   = 0.74   # dominant — rewards correct range
+        self.alpha_short = 0.07   # penalizes unexpectedly close readings
+        self.alpha_max   = 0.07   # handles max-range failures
+        self.alpha_rand  = 0.12   # catches random noise
+        self.sigma_hit   = 8.0    # in table units (pixels); tune based on map resolution
 
         # Your sensor table will be a `table_width` x `table_width` np array:
         self.table_width = 201
@@ -71,7 +71,7 @@ class SensorModel:
         """
         Generate and store a table which represents the sensor model.
 
-        For each discrete computed range value, this provides the probability of 
+        For each discrete computed range value, this provides the probability of
         measuring any (discrete) range. This table is indexed by the sensor model
         at runtime by discretizing the measurements and computed ranges from
         RangeLibc.
@@ -87,7 +87,57 @@ class SensorModel:
             No return type. Directly modify `self.sensor_model_table`.
         """
 
-        raise NotImplementedError
+        max_range = self.table_width - 1  # e.g. 200
+
+        d_vals = np.arange(self.table_width)  # true ranges  (0..200)
+        r_vals = np.arange(self.table_width)  # measured ranges (0..200)
+
+        # Broadcast: d is (table_width, 1), r is (1, table_width)
+        d = d_vals[:, np.newaxis].astype(float)
+        r = r_vals[np.newaxis, :].astype(float)
+
+        # --- p_hit: Gaussian centered at d, only for 0 <= r <= max_range ---
+        p_hit = np.exp(-0.5 * (r - d) ** 2 / (self.sigma_hit ** 2))
+        p_hit /= (self.sigma_hit * np.sqrt(2 * np.pi))
+        p_hit[r < 0] = 0.0
+        p_hit[r > max_range] = 0.0
+        # Normalize each column (each true range d) so it sums to 1
+        p_hit_sum = p_hit.sum(axis=1, keepdims=True)
+        p_hit_sum[p_hit_sum == 0] = 1  # avoid div by zero
+        p_hit = p_hit / p_hit_sum
+
+        # --- p_short: exponential decay for r <= d ---
+        # p_short(r|d) = lambda * exp(-lambda * r), for 0 <= r <= d
+        # We pick lambda = 1.0 (can be tuned)
+        lambda_short = 1.0
+        p_short = lambda_short * np.exp(-lambda_short * r)
+        p_short[r > d] = 0.0
+        p_short[r < 0] = 0.0
+        # Normalize per true range d
+        p_short_sum = p_short.sum(axis=1, keepdims=True)
+        p_short_sum[p_short_sum == 0] = 1
+        p_short = p_short / p_short_sum
+
+        # --- p_max: point mass at max_range ---
+        p_max = np.zeros((self.table_width, self.table_width))
+        p_max[:, -1] = 1.0  # r == max_range
+
+        # --- p_rand: uniform over [0, max_range] ---
+        p_rand = np.ones((self.table_width, self.table_width)) / self.table_width
+
+        # --- Combine ---
+        self.sensor_model_table = (
+            self.alpha_hit   * p_hit   +
+            self.alpha_short * p_short +
+            self.alpha_max   * p_max   +
+            self.alpha_rand  * p_rand
+        )
+
+        # Normalize each row (each true range d) so probabilities sum to 1
+        row_sums = self.sensor_model_table.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1
+        self.sensor_model_table /= row_sums
+
 
     def evaluate(self, particles, observation):
         """
@@ -113,17 +163,40 @@ class SensorModel:
         if not self.map_set:
             return
 
-        ####################################
-        # TODO
-        # Evaluate the sensor model here!
-        #
-        # You will probably want to use this function
-        # to perform ray tracing from all the particles.
-        # This produces a matrix of size N x num_beams_per_particle 
-
+        # Ray-trace expected ranges for every particle: shape (N, num_beams)
         scans = self.scan_sim.scan(particles)
 
-        ####################################
+        # Convert to table indices by scaling to [0, table_width-1]
+        # scans and observation are in meters; convert using resolution
+        max_range_px = self.table_width - 1
+
+        # Scale computed ranges and observations to pixel/table units
+        scans_px = np.clip(
+            scans / (self.resolution * self.lidar_scale_to_map_scale),
+            0, max_range_px
+        ).astype(int)
+
+        # Downsample observation to num_beams_per_particle beams
+        # (observation is the full scan; we need to subsample to match scans)
+        obs_indices = np.linspace(0, len(observation) - 1, self.num_beams_per_particle, dtype=int)
+        obs = observation[obs_indices]
+
+        obs_px = np.clip(
+            obs / (self.resolution * self.lidar_scale_to_map_scale),
+            0, max_range_px
+        ).astype(int)  # shape: (num_beams,)
+        # Look up probabilities from precomputed table
+        # scans_px: (N, num_beams), obs_px: (num_beams,)
+        # Table is indexed [true_range_d, measured_range_r]
+        probs = self.sensor_model_table[scans_px, obs_px[np.newaxis, :]]
+        # probs shape: (N, num_beams)
+
+        # Multiply probabilities across beams (log-sum for numerical stability)
+        log_probs = np.log(probs + 1e-300).sum(axis=1)
+        probabilities = np.exp(log_probs)
+
+        return probabilities
+
 
     def map_callback(self, map_msg):
         # Convert the map to a numpy array
