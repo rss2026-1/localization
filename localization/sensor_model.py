@@ -96,7 +96,7 @@ class SensorModel:
         d = d_vals[:, np.newaxis].astype(float)
         r = r_vals[np.newaxis, :].astype(float)
 
-        # --- p_hit: Gaussian centered at d, only for 0 <= r <= max_range ---
+        # p_hit: Gaussian centered at d, only for 0 <= r <= max_range
         p_hit = np.exp(-0.5 * (r - d) ** 2 / (self.sigma_hit ** 2))
         p_hit /= (self.sigma_hit * np.sqrt(2 * np.pi))
         p_hit[r < 0] = 0.0
@@ -106,7 +106,7 @@ class SensorModel:
         p_hit_sum[p_hit_sum == 0] = 1  # avoid div by zero
         p_hit = p_hit / p_hit_sum
 
-        # --- p_short: exponential decay for r <= d ---
+        # p_short: exponential decay for r <= d
         # p_short(r|d) = lambda * exp(-lambda * r), for 0 <= r <= d
         # We pick lambda = 1.0 (can be tuned)
         lambda_short = 1.0
@@ -118,14 +118,14 @@ class SensorModel:
         p_short_sum[p_short_sum == 0] = 1
         p_short = p_short / p_short_sum
 
-        # --- p_max: point mass at max_range ---
+        # p_max: point mass at max_range
         p_max = np.zeros((self.table_width, self.table_width))
         p_max[:, -1] = 1.0  # r == max_range
 
-        # --- p_rand: uniform over [0, max_range] ---
+        # p_rand: uniform over [0, max_range]
         p_rand = np.ones((self.table_width, self.table_width)) / self.table_width
 
-        # --- Combine ---
+        # Combine
         self.sensor_model_table = (
             self.alpha_hit   * p_hit   +
             self.alpha_short * p_short +
