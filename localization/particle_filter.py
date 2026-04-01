@@ -2,8 +2,9 @@ from localization.sensor_model import SensorModel
 from localization.motion_model import MotionModel
 
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import PoseWithCovarianceStamped
-from tf_transformations import euler_from_quaternion
+from geometry_msgs.msg import PoseWithCovarianceStamped, PoseArray, Pose, TransformStamped
+from tf_transformations import euler_from_quaternion, quaternion_from_euler
+from sensor_msgs.msg import LaserScan
 
 from rclpy.node import Node
 import rclpy
@@ -28,12 +29,16 @@ class ParticleFilter(Node):
         #     a twist component, you will only be provided with the
         #     twist component, so you should rely only on that
         #     information, and *not* use the pose component.
-        
+
         self.declare_parameter('odom_topic', "/odom")
         self.declare_parameter('scan_topic', "/scan")
 
         scan_topic = self.get_parameter("scan_topic").get_parameter_value().string_value
         odom_topic = self.get_parameter("odom_topic").get_parameter_value().string_value
+
+        self.num_particles = 200
+        self.laser_callback_freq = 20 #in Hz
+        self.laser_callback_prev_time = 0.0
 
         self.laser_sub = self.create_subscription(LaserScan, scan_topic,
                                                   self.laser_callback,
@@ -53,6 +58,10 @@ class ParticleFilter(Node):
                                                  self.pose_callback,
                                                  1)
 
+        self.pose_estimate_sub = self.create_subscription(Odometry, "/pf/pose/odom",
+                                                 self.pose_estimate_callback,
+                                                 1)
+
         #  *Important Note #3:* You must publish your pose estimate to
         #     the following topic. In particular, you must use the
         #     pose field of the Odometry message. You do not need to
@@ -65,7 +74,7 @@ class ParticleFilter(Node):
         # Initialize the models
         self.motion_model = MotionModel(self)
         self.sensor_model = SensorModel(self)
-        self.last_time = None
+        self.last_time = self.get_clock().now()
 
         self.get_logger().info("=============+READY+=============")
 
@@ -79,47 +88,109 @@ class ParticleFilter(Node):
         # Publish a transformation frame between the map
         # and the particle_filter_frame.
 
-        
+    def average_particle_pose(self):
+        avg_pose = np.average(self.particles[:, :2], axis = 0)
 
-        def laser_callback(msg):
-            ranges = np.array(msg.ranges)
-             = self.sensor_model.evaluate(self.particles, ranges)
+        # theta, sins, cosines
+        thetas = self.particles[:,2]
+        sin_lis = np.average(np.sin(thetas), axis = 0)
+        cos_lis = np.average(np.cos(thetas), axis = 0)
+        avg_theta = np.arctan2(sin_lis, cos_lis)
 
-        def odom_callback(msg):
-            pass
-            twist = msg.twist.twist
-            vx = twist.linear.x
-            vy = twist.linear.y
-            vyaw = twist.angular.z
+        q = quaternion_from_euler(0, 0, avg_theta)
 
-            if self.last_time is None:
-                self.last_time = rclpy.time.Time(msg.header.stamp)
-            else:
-                current_time = rclpy.time.Time(msg.header.stamp)
-                dt = (current_time - self.last_time).nanoseconds / 1e9
+        # Publish odometry
+        ##################################
+        #           Odometry             #
+        ##################################
+        odom_msg = Odometry()
+        odom_msg.header.frame_id = "/map"
+        odom_msg.child_frame_id = self.particle_filter_frame
 
-            dx = vx * dt
-            dy = vy * dt
-            dyaw = vyaw * dt
+        odom_msg.pose.pose.position.x = avg_pose[0]
+        odom_msg.pose.pose.position.y = avg_pose[1]
+        odom_msg.pose.pose.position.z = 0.0
 
-            self.particles = self.motion_model.evaluate(self.particles, (dx, dy, dyaw))
+        # Using quaternions
+        quat = euler_from_quaternion((0, 0, avg_theta))
+        odom_msg.pose.pose.orientation.x = quat[0]
+        odom_msg.pose.pose.orientation.y = quat[1]  
+        odom_msg.pose.pose.orientation.z = quat[2]
+        odom_msg.pose.pose.orientation.w = quat[3]
+
+        # Publish the odometry message
+        self.odom_pub.publish(odom_msg)
+
+        ##################################
+        #         Transform Pose         #
+        ##################################
+        transform_msg = TransformStamped()
+        transform_msg.header.frame_id = "/map"
+        transform_msg.child_frame_id = "/base_link_pf"
+
+        transform_msg.transform.translation.x = avg_pose[0]
+        transform_msg.transform.translation.y = avg_pose[1]
+        transform_msg.transform.translation.z = 0.0
+
+        transform_msg.transform.rotation.x = quat[0]
+        transform_msg.transform.rotation.y = quat[1]
+        transform_msg.transform.rotation.z = quat[2]
+        transform_msg.transform.rotation.w = quat[3]
+
+        # Publish the transform message
+        self.tf_broadcaster.sendTransform(transform_msg)
 
 
 
-        def pose_callback(msg):
-            pose = msg.pose.pose
-            x = pose.position.x
-            y = pose.position.y
-            quaternion = (pose.orientation.x, pose.orientation.y, 
-                        pose.orientation.z, pose.orientation.w)
-            _, _, yaw = euler_from_quaternion(quaternion)
-            
-            mean = [x, y, yaw]
+    def laser_callback(self, msg):
+        ranges = np.array(msg.ranges)
+        probs = self.sensor_model.evaluate(self.particles, ranges)
+        self.particles = np.random.choice(self.particles, self.num_particles, True, probs)
 
-            covariance = np.array(msg.pose.covariance).reshape(6, 6)[np.ix_([0, 1, 5], [0, 1, 5])]
-            # Change this (100) to number of particle variable
-            particles =  np.random.multivariate_normal(mean, covariance, 100)
-            self.particles = particles
+    def odom_callback(self, msg):
+        pass
+        twist = msg.twist.twist
+        vx = twist.linear.x
+        vy = twist.linear.y
+        vyaw = twist.angular.z
+
+        current_time = rclpy.time.Time(msg.header.stamp)
+        dt = (current_time - self.last_time).nanoseconds / 1e9
+        self.last_time = current_time
+
+        dx = vx * dt
+        dy = vy * dt
+        dyaw = vyaw * dt
+        v = np.sqrt(vx**2 + vy**2)
+
+        # Derive steering angle from bicycle model inverse
+        L = self.motion_model.wheelbase
+        if v > 1e-3:
+            steering_angle = np.arctan(L * vyaw / v)
+        else:
+            steering_angle = 0.0
+
+        self.particles = self.motion_model.evaluate(
+            self.particles, (dx, dy, dyaw),
+            v=v, steering_angle=steering_angle, dt=dt
+        )
+
+
+    def pose_callback(self, msg):
+        pose = msg.pose.pose
+        x = pose.position.x
+        y = pose.position.y
+        quaternion = (pose.orientation.x, pose.orientation.y,
+                    pose.orientation.z, pose.orientation.w)
+        _, _, yaw = euler_from_quaternion(quaternion)
+
+        mean = [x, y, yaw]
+
+        covariance = np.array(msg.pose.covariance).reshape(6, 6)[np.ix_([0, 1, 5], [0, 1, 5])]
+        # Change this (100) to number of particle variable
+        particles =  np.random.multivariate_normal(mean, covariance, self.num_particles)
+        self.particles = particles
+
 
 
 
