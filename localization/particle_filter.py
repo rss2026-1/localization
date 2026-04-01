@@ -3,9 +3,12 @@ from localization.motion_model import MotionModel
 
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseWithCovarianceStamped
+from tf_transformations import euler_from_quaternion
 
 from rclpy.node import Node
 import rclpy
+import numpy as np
+
 
 assert rclpy
 
@@ -62,6 +65,7 @@ class ParticleFilter(Node):
         # Initialize the models
         self.motion_model = MotionModel(self)
         self.sensor_model = SensorModel(self)
+        self.last_time = None
 
         self.get_logger().info("=============+READY+=============")
 
@@ -74,6 +78,49 @@ class ParticleFilter(Node):
         #
         # Publish a transformation frame between the map
         # and the particle_filter_frame.
+
+        
+
+        def laser_callback(msg):
+            ranges = np.array(msg.ranges)
+             = self.sensor_model.evaluate(self.particles, ranges)
+
+        def odom_callback(msg):
+            pass
+            twist = msg.twist.twist
+            vx = twist.linear.x
+            vy = twist.linear.y
+            vyaw = twist.angular.z
+
+            if self.last_time is None:
+                self.last_time = rclpy.time.Time(msg.header.stamp)
+            else:
+                current_time = rclpy.time.Time(msg.header.stamp)
+                dt = (current_time - self.last_time).nanoseconds / 1e9
+
+            dx = vx * dt
+            dy = vy * dt
+            dyaw = vyaw * dt
+
+            self.particles = self.motion_model.evaluate(self.particles, (dx, dy, dyaw))
+
+
+
+        def pose_callback(msg):
+            pose = msg.pose.pose
+            x = pose.position.x
+            y = pose.position.y
+            quaternion = (pose.orientation.x, pose.orientation.y, 
+                        pose.orientation.z, pose.orientation.w)
+            _, _, yaw = euler_from_quaternion(quaternion)
+            
+            mean = [x, y, yaw]
+
+            covariance = np.array(msg.pose.covariance).reshape(6, 6)[np.ix_([0, 1, 5], [0, 1, 5])]
+            # Change this (100) to number of particle variable
+            particles =  np.random.multivariate_normal(mean, covariance, 100)
+            self.particles = particles
+
 
 
 def main(args=None):
