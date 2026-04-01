@@ -3,7 +3,7 @@ from scan_simulator_2d import PyScanSimulator2D
 # Try to change to just `from scan_simulator_2d import PyScanSimulator2D`
 # if any error re: scan_simulator_2d occurs
 
-from tf_transformations import euler_from_quaternion
+from scipy.spatial.transform import Rotation as R
 
 from nav_msgs.msg import OccupancyGrid
 
@@ -96,24 +96,21 @@ class SensorModel:
         d = d_vals[:, np.newaxis].astype(float)
         r = r_vals[np.newaxis, :].astype(float)
 
-        # p_hit: Gaussian centered at d, only for 0 <= r <= max_range
+        # --- p_hit ---
         p_hit = np.exp(-0.5 * (r - d) ** 2 / (self.sigma_hit ** 2))
         p_hit /= (self.sigma_hit * np.sqrt(2 * np.pi))
-        p_hit[r < 0] = 0.0
-        p_hit[r > max_range] = 0.0
-        # Normalize each column (each true range d) so it sums to 1
+        # Use 2D boolean masks
+        p_hit = np.where((r >= 0) & (r <= max_range), p_hit, 0.0)
+        # Normalize each row
         p_hit_sum = p_hit.sum(axis=1, keepdims=True)
-        p_hit_sum[p_hit_sum == 0] = 1  # avoid div by zero
+        p_hit_sum[p_hit_sum == 0] = 1
         p_hit = p_hit / p_hit_sum
 
-        # p_short: exponential decay for r <= d
-        # p_short(r|d) = lambda * exp(-lambda * r), for 0 <= r <= d
-        # We pick lambda = 1.0 (can be tuned)
+        # --- p_short ---
         lambda_short = 1.0
         p_short = lambda_short * np.exp(-lambda_short * r)
-        p_short[r > d] = 0.0
-        p_short[r < 0] = 0.0
-        # Normalize per true range d
+        # Use 2D boolean mask — r must be broadcast against d for the r <= d condition
+        p_short = np.where((r >= 0) & (r <= d), p_short, 0.0)
         p_short_sum = p_short.sum(axis=1, keepdims=True)
         p_short_sum[p_short_sum == 0] = 1
         p_short = p_short / p_short_sum
@@ -208,12 +205,10 @@ class SensorModel:
         # Convert the origin to a tuple
         origin_p = map_msg.info.origin.position
         origin_o = map_msg.info.origin.orientation
-        origin_o = euler_from_quaternion((
-            origin_o.x,
-            origin_o.y,
-            origin_o.z,
-            origin_o.w))
-        origin = (origin_p.x, origin_p.y, origin_o[2])
+        quat = [origin_o.x, origin_o.y, origin_o.z, origin_o.w]
+        yaw = R.from_quat(quat).as_euler("xyz")[2]
+
+        origin = (origin_p.x, origin_p.y, yaw)
 
         # Initialize a map with the laser scan
         self.scan_sim.set_map(
