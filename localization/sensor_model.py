@@ -12,7 +12,7 @@ import sys
 np.set_printoptions(threshold=sys.maxsize)
 
 
-class SensorModel:
+class SensorModel():
 
     def __init__(self, node):
         node.declare_parameter('map_topic', "default")
@@ -92,35 +92,36 @@ class SensorModel:
         d_vals = np.arange(self.table_width)  # true ranges  (0..200)
         r_vals = np.arange(self.table_width)  # measured ranges (0..200)
 
-        # Broadcast: d is (table_width, 1), r is (1, table_width)
-        d = d_vals[:, np.newaxis].astype(float)
-        r = r_vals[np.newaxis, :].astype(float)
+        # Broadcast: r along rows (axis 0), d along columns (axis 1) — matches notebook
+        d = d_vals[np.newaxis, :].astype(float)  # shape (1, table_width)
+        r = r_vals[:, np.newaxis].astype(float)  # shape (table_width, 1)
 
         # --- p_hit ---
         p_hit = np.exp(-0.5 * (r - d) ** 2 / (self.sigma_hit ** 2))
         p_hit /= (self.sigma_hit * np.sqrt(2 * np.pi))
-        # Use 2D boolean masks
         p_hit = np.where((r >= 0) & (r <= max_range), p_hit, 0.0)
-        # Normalize each row
-        p_hit_sum = p_hit.sum(axis=1, keepdims=True)
+        # Normalize each column (each d value) so p_hit sums to 1 over r
+        p_hit_sum = p_hit.sum(axis=0, keepdims=True)
         p_hit_sum[p_hit_sum == 0] = 1
         p_hit = p_hit / p_hit_sum
 
-        # --- p_short ---
-        lambda_short = 1.0
-        p_short = lambda_short * np.exp(-lambda_short * r)
-        # Use 2D boolean mask — r must be broadcast against d for the r <= d condition
-        p_short = np.where((r >= 0) & (r <= d), p_short, 0.0)
-        p_short_sum = p_short.sum(axis=1, keepdims=True)
-        p_short_sum[p_short_sum == 0] = 1
-        p_short = p_short / p_short_sum
+        # --- p_short: triangular distribution (2/d)*(1 - r/d) for 0 <= r <= d ---
+        with np.errstate(divide='ignore', invalid='ignore'):
+            p_short = np.where(
+                (d != 0) & (r >= 0) & (r <= d),
+                (2.0 / d) * (1.0 - r / d),
+                0.0
+            )
 
-        # p_max: point mass at max_range
+        # p_max: point mass at max_range — last row (r == max_range)
         p_max = np.zeros((self.table_width, self.table_width))
-        p_max[:, -1] = 1.0  # r == max_range
+        p_max[-1, :] = 1.0
 
         # p_rand: uniform over [0, max_range]
-        p_rand = np.ones((self.table_width, self.table_width)) / self.table_width
+        p_rand = np.where(
+            (r >= 0) & (r <= max_range),
+            1.0 / max_range,
+            0.0)
 
         # Combine
         self.sensor_model_table = (
@@ -130,10 +131,11 @@ class SensorModel:
             self.alpha_rand  * p_rand
         )
 
-        # Normalize each row (each true range d) so probabilities sum to 1
-        row_sums = self.sensor_model_table.sum(axis=1, keepdims=True)
-        row_sums[row_sums == 0] = 1
-        self.sensor_model_table /= row_sums
+        # Normalize each column (each d value) so probabilities sum to 1
+        col_sums = self.sensor_model_table.sum(axis=0, keepdims=True)
+        col_sums[col_sums == 0] = 1
+        self.sensor_model_table /= col_sums
+
 
 
     def evaluate(self, particles, observation):
@@ -158,7 +160,7 @@ class SensorModel:
         """
 
         if not self.map_set:
-            return
+            return "Map not set"
 
         # Ray-trace expected ranges for every particle: shape (N, num_beams)
         scans = self.scan_sim.scan(particles)
@@ -185,11 +187,12 @@ class SensorModel:
         # Look up probabilities from precomputed table
         # scans_px: (N, num_beams), obs_px: (num_beams,)
         # Table is indexed [true_range_d, measured_range_r]
-        probs = self.sensor_model_table[scans_px, obs_px[np.newaxis, :]]
+        probs = self.sensor_model_table[obs_px[np.newaxis, :], scans_px]
         # probs shape: (N, num_beams)
+        # return probs
 
         # Multiply probabilities across beams (log-sum for numerical stability)
-        log_probs = np.log(probs + 1e-300).sum(axis=1)
+        log_probs = np.log(probs).sum(axis=1)
         probabilities = np.exp(log_probs)
 
         return probabilities

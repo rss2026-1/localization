@@ -78,8 +78,6 @@ class MotionModel:
         Update particles using the kinematic bicycle model when Ackermann data
         is available, otherwise falls back to nominal evaluate function.
         """
-        self.node.get_logger().info("Bike Model")
-
         N = len(particles)
 
         use_bicycle = (v is not None) and (steering_angle is not None) and (dt is not None)
