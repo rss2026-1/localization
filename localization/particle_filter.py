@@ -1,20 +1,27 @@
+'''
+To start up everything
+-> colcon build and source in racecar_ws like normal
+source install/setup.bash
+source ~/sim_ws/install/setup.bash
+ros2 launch localization real_localize.launch.xml
+ros2 launch racecar_simulator localization_simulate.launch.xml
+'''
+
 from localization.sensor_model import SensorModel
 from localization.motion_model import MotionModel
 
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseArray, Pose, TransformStamped
-from tf_transformations import euler_from_quaternion, quaternion_from_euler
 import tf2_ros
-from sensor_msgs.msg import LaserScan
+from scipy.spatial.transform import Rotation as R
 
+from sensor_msgs.msg import LaserScan
 
 from rclpy.node import Node
 import rclpy
 import numpy as np
 
-
 assert rclpy
-
 
 class ParticleFilter(Node):
 
@@ -77,6 +84,9 @@ class ParticleFilter(Node):
         #     "/map" frame.
 
         self.odom_pub = self.create_publisher(Odometry, "/pf/pose/odom", 1)
+        # self.odom_pub = self.create_publisher(Odometry, self.particle_filter_frame, 1)
+        # self.odom_pub = self.create_publisher(Odometry, "pf/vesc/odom", 1)
+        # self.laser_pub = self.create_publisher(LaserScan, '/new_scan', 1)
 
         self.pose_pub = self.create_publisher(PoseArray, "/particles", 1)
         # Initialize the models
@@ -85,6 +95,7 @@ class ParticleFilter(Node):
         self.last_time = self.get_clock().now()
 
         self.get_logger().info("=============+READY+=============")
+        self.get_logger().info(self.particle_filter_frame)
 
         # Implement the MCL algorithm
         # using the sensor model and the motion model
@@ -102,11 +113,26 @@ class ParticleFilter(Node):
         ranges = np.array(msg.ranges)
         probs = self.sensor_model.evaluate(self.particles, ranges)
         # self.get_logger().info(f"Probabilities: {probs}")
-        if probs =="Map not set":
+        if all(probs == "Map not set"):
             return
+        probs = probs ** (1/3)
         indices = np.random.choice(len(self.particles), self.num_particles, True, probs/np.sum(probs))
-        self.particles = self.particles[indices]
+        rng = np.random.default_rng()
+        #map1
+        # noise = rng.normal(loc=0.0, scale=[0.1, 0.1, 0.05], size=self.particles.shape) run1
+        # noise = rng.normal(loc=0.0, scale=[0.2, 0.2, 0.1], size=self.particles.shape) #run2
+        #map2
+        # noise = rng.normal(loc=0.0, scale=[0.07, 0.07, 0.35], size=self.particles.shape) #run3
+        # noise = rng.normal(loc=0.0, scale=[0.07, 0.07, 0.35], size=self.particles.shape) #run4
+        # noise = rng.normal(loc=0.0, scale=[0.2, 0.2, 0.1], size=self.particles.shape) #run5
+        noise = rng.normal(loc=0.0, scale=[0.1, 0.1, 0.05], size=self.particles.shape) #run6
 
+        particles = self.particles[indices] + noise
+        particles[:, 2] = np.arctan2(np.sin(particles[:, 2]), np.cos(particles[:, 2]))
+        self.particles = particles
+
+        # msg.header.frame_id = self.particle_filter_frame
+        # self.laser_pub.publish(msg)
 
     def odom_callback(self, msg):
         if self.particles is None:
@@ -157,25 +183,23 @@ class ParticleFilter(Node):
         odom_msg.pose.pose.position.z = 0.0
 
         # Using quaternions
-        quat = quaternion_from_euler(0, 0, avg_theta)
+        quat = R.from_euler('xyz', [0.0, 0.0, avg_theta]).as_quat()
         odom_msg.pose.pose.orientation.x = quat[0]
         odom_msg.pose.pose.orientation.y = quat[1]
         odom_msg.pose.pose.orientation.z = quat[2]
         odom_msg.pose.pose.orientation.w = quat[3]
 
-        self.get_logger().info(f"Publishing {avg_pose[0]}, {avg_pose[1]}")
+        # self.get_logger().info(f"Publishing {avg_pose[0]}, {avg_pose[1]}")
         # Publish the odometry message
         self.odom_pub.publish(odom_msg)
-
-
 
         ##################################
         #         Transform Pose         #
         ##################################
         transform_msg = TransformStamped()
         transform_msg.header.frame_id = "/map"
-        transform_msg.child_frame_id = "/base_link_pf"
-
+        transform_msg.child_frame_id = self.particle_filter_frame
+        # self.get_logger().info(f"from /map to {self.particle_filter_frame}")
         transform_msg.transform.translation.x = avg_pose[0]
         transform_msg.transform.translation.y = avg_pose[1]
         transform_msg.transform.translation.z = 0.0
@@ -196,14 +220,19 @@ class ParticleFilter(Node):
             pose = Pose()
             pose.position.x = particle[0]
             pose.position.y = particle[1]
-            pose.orientation.z = np.sin(particle[2]/2)
-            pose.orientation.w = np.cos(particle[2]/2)
+            pose.position.z = 0.0
+
+            quat = R.from_euler('xyz', [0.0, 0.0, float(particle[2])]).as_quat()
+            pose.orientation.x = quat[0]
+            pose.orientation.y = quat[1]
+            pose.orientation.z = quat[2]
+            pose.orientation.w = quat[3]
+
             particle_msg.poses.append(pose)
+            # pose.orientation.z = np.sin(particle[2]/2)
+            # pose.orientation.w = np.cos(particle[2]/2)
+            # particle_msg.poses.append(pose)
         self.pose_pub.publish(particle_msg)
-
-
-
-
 
     def pose_callback(self, msg):
         pose = msg.pose.pose
@@ -211,23 +240,13 @@ class ParticleFilter(Node):
         y = pose.position.y
         quaternion = (pose.orientation.x, pose.orientation.y,
                     pose.orientation.z, pose.orientation.w)
-        _, _, yaw = euler_from_quaternion(quaternion)
+        yaw = R.from_quat(quaternion).as_euler('xyz')[2]
 
         mean = [x, y, yaw]
 
         covariance = np.array(msg.pose.covariance).reshape(6, 6)[np.ix_([0, 1, 5], [0, 1, 5])]
         particles =  np.random.multivariate_normal(mean, covariance, self.num_particles)
         self.particles = particles
-
-
-
-
-
-
-
-
-
-
 
 def main(args=None):
     rclpy.init(args=args)
