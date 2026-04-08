@@ -131,8 +131,14 @@ class ParticleFilter(Node):
         particles[:, 2] = np.arctan2(np.sin(particles[:, 2]), np.cos(particles[:, 2]))
         self.particles = particles
 
-        # msg.header.frame_id = self.particle_filter_frame
-        # self.laser_pub.publish(msg)
+        avg_pose = np.average(self.particles[:, :2], axis = 0)
+
+        # theta, sins, cosines
+        thetas = self.particles[:,2]
+        sin_lis = np.average(np.sin(thetas), axis = 0)
+        cos_lis = np.average(np.cos(thetas), axis = 0)
+        avg_theta = np.arctan2(sin_lis, cos_lis)
+
 
     def odom_callback(self, msg):
         if self.particles is None:
@@ -176,6 +182,7 @@ class ParticleFilter(Node):
         ##################################
         odom_msg = Odometry()
         odom_msg.header.frame_id = "/map"
+        odom_msg.header.stamp = self.get_clock().now().to_msg()
         odom_msg.child_frame_id = self.particle_filter_frame
 
         odom_msg.pose.pose.position.x = avg_pose[0]
@@ -198,6 +205,7 @@ class ParticleFilter(Node):
         ##################################
         transform_msg = TransformStamped()
         transform_msg.header.frame_id = "/map"
+        transform_msg.header.stamp = self.get_clock().now().to_msg()
         transform_msg.child_frame_id = self.particle_filter_frame
         # self.get_logger().info(f"from /map to {self.particle_filter_frame}")
         transform_msg.transform.translation.x = avg_pose[0]
